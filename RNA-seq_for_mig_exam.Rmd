@@ -317,8 +317,9 @@ padj_threshold <- 0.05
 dds <- DESeq(dds)
 
 res <- results(dds,lfcThreshold = 0.585, alpha = padj_threshold)
+res_sig <- res[res$padj <= padj_threshold & !is.na(res$padj), ]
 
-datatable(as.data.frame(res))
+datatable(as.data.frame(res_sig), rownames = FALSE)
 ```
 
 # Answers to exam questions:
