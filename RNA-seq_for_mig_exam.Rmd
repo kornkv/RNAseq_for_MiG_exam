@@ -1,0 +1,349 @@
+---
+title: "RNA-seq_for_mig_exam"
+author: "KN"
+date: "2023-06-17"
+output: 
+  html_document:
+    html_document:
+    toc: true
+    toc_float: true
+    theme: united
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DESeq2)
+library(ggplot2)
+library(tidyverse)
+library(DT)
+library(knitr)
+library(kableExtra)
+```
+# Introduction
+
+This is report file for the practical part of the Methods in Genomics exam.
+It is attempt to reproduce a part of an RNA-seq analysis from the following paper: https://doi.org/10.1093/nar/gkab027.
+Specifically, identification of fission yeast genes showing differential expression in
+the dbl2_KO mutant.
+
+# Variables
+
+```{bash, eval=FALSE}
+
+WORKDIR="/home/kate/Bioinf/migexam/"
+
+FASTQDIR="/home/kate/Bioinf/migexam/rawdata"
+
+ADAPTseq="/home/kate/Bioinf/migexam/TruSeq3-PE-2.fa"
+```
+
+# Working directory structure
+
+```{bash, eval=FALSE}
+cd $WORKDIR
+
+mkdir quality_control
+
+mkdir quality_control/{raw,trimmed,mapped}
+
+mkdir trimmed_data
+
+mkdir mapping
+
+mkdir mapping/genome_star
+
+mkdir counts_and_analysis
+
+mkdir annotation
+```
+
+# Data downloading 
+
+```{bash, eval=FALSE}
+Outdir='/home/kate/Bioinf/migexam/rawdata'
+
+AccesionNumbers=(SRR10913897 SRR10913909 SRR10913907 SRR10913910
+SRR10913908 SRR10913911 SRR10913912 SRR10913906
+SRR10913905 SRR10913904 SRR10913903 SRR10913901
+SRR10913900 SRR10913899 SRR10913902 SRR10913898 )
+
+for t in ${AccesionNumbers[@]}; do\
+echo -e "=======================\n processing
+${t}...\n=======================";\
+
+fasterq-dump -p --split-files ${t} -O $Outdir; done
+```
+
+# Raw data quality control
+
+```{bash, eval=FALSE}
+
+cd $FASTQDIR
+
+for sam in * ; do \
+
+fastqc -t 8 -o ${WORKDIR}/quality_control/raw
+$sam; done
+
+cd ${WORKDIR}/quality_control/raw
+
+multiqc ./*_fastqc*
+```
+
+The raw data quality control showed a difference between replicates A/B and C/D.
+All C and D replicates showed Adenine nucleotide exhaustion after 72 cycles, and the read length was from 22 to 75, making me think those replicates were already trimmed from adapters.
+A and B replicates were showing good nucleotide content for the whole length and were strictly 75 bp.
+
+# Trimming settings
+## A and B replicates
+
+```{bash,eval=FALSE}
+for sam in $(basename -s _1.fastqsanger.gz
+${FASTQDIR}/ab_data/*_1.fastqsanger.gz); do echo -e
+"=======================\n processing
+${sam}...\n======================="; trimmomatic PE -threads 8
+${FASTQDIR}/ab_data/${sam}_1.fastqsanger.gz \
+${FASTQDIR}/ab_data/${sam}_2.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_1P.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_1U.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_2P.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_2U.fastqsanger.gz \
+ILLUMINACLIP:$ADAPTseq:2:30:10:8:True SLIDINGWINDOW:4:15
+TRAILING:10 MINLEN:22 ; done
+```
+
+## C and D replicates
+
+```{bash, eval=FALSE}
+for sam in $(basename -s _1.fastqsanger.gz
+${FASTQDIR}/cd_data/*_1.fastqsanger.gz); do echo -e
+"=======================\n processing
+${sam}...\n======================="; trimmomatic PE -threads 8
+${FASTQDIR}/cd_data/${sam}_1.fastqsanger.gz \
+${FASTQDIR}/cd_data/${sam}_2.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_1P.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_1U.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_2P.fastqsanger.gz \
+${WORKDIR}/trimmed_data/${sam}_2U.fastqsanger.gz \
+CROP:72 ILLUMINACLIP:$ADAPTseq:2:30:10:8:True SLIDINGWINDOW:4:15
+TRAILING:10 MINLEN:22 ; done
+```
+
+QC of trimmed data was decent, so I proceeded with mapping.
+
+# Mapping
+
+## Mapping reference genom index preparation
+
+```{bash,eval=FALSE}
+
+cd ${WORKDIR}/mapping/genome_star
+
+wget
+http://ftp.ensemblgenomes.org/pub/fungi/release-56/fasta/schizosaccharomyces_pombe/dna/Schizosaccharo
+myces_pombe.ASM294v2.dna.toplevel.fa.gz
+
+wget
+https://ftp.ensemblgenomes.ebi.ac.uk/pub/fungi/release-56/gff3/schizosaccharomyces_pombe/Schizosacchar
+omyces_pombe.ASM294v2.56.chr.gff3.gz
+
+gzip -d Schizosaccharomyces_pombe.ASM294v2.dna.toplevel.fa.gz
+
+gzip -d Schizosaccharomyces_pombe.ASM294v2.56.chr.gff3.gz
+
+STAR --runThreadN 8 --runMode genomeGenerate --genomeDir ./ --genomeFastaFiles
+Schizosaccharomyces_pombe.ASM294v2.dna.toplevel.fa --sjdbGTFfile
+Schizosaccharomyces_pombe.ASM294v2.56.chr.gff3 --sjdbGTFtagExonParentTranscript Parent
+--genomeSAindexNbases 10 --sjdbOverhang 74
+
+```
+
+## Mapping 
+
+```{bash,eval=FALSE}
+
+for sam in $(basename -s _1P.fastqsanger.gz ${WORKDIR}/trimmed_data/*_1P.fastqsanger.gz); do \
+echo -e "================================\n processing ${sam}...\n================================"; \
+STAR --runThreadN 8 --genomeDir ${WORKDIR}/mapping/genome_star \
+--readFilesIn ${WORKDIR}/trimmed_data/${sam}_1P.fastqsanger.gz \
+/${WORKDIR}/trimmed_data/${sam}_2P.fastqsanger.gz \
+--readFilesCommand zcat \
+--alignSJoverhangMin 8 \
+--alignSJDBoverhangMin 1 --outFilterMismatchNmax 999 --outFilterMismatchNoverReadLmax 0.04 \
+--alignIntronMin 20 --alignIntronMax 20000 --alignMatesGapMax 2000 \
+--outFileNamePrefix ${WORKDIR}/mapping/${sam} \
+--outFilterIntronMotifs RemoveNoncanonical --outSAMtype BAM Unsorted--twopassMode Basic ; \
+done
+
+```
+
+## Sorting
+
+```{bash,eval=FALSE}
+for sam in $(basename -s .out.bam /${WORKDIR}/mapping/*.out.bam); do \
+echo -e "================================\n processing ${sam}...\n================================"; \
+samtools sort -o ${sam}.sorted.out.bam ${sam}.out.bam; done
+```
+
+## Indexing
+
+```{bash,eval=FALSE}
+
+for sam in *.sorted.out.bam ; do \
+echo -e "================================\n processing ${sam}...\n================================"; \
+samtools index $sam ; done
+
+```
+
+## BigWig
+
+```{bash,eval=FALSE}
+
+for sam in *Aligned.sortedByCoord.out.bam; do \
+bamCoverage --binSize 1 --normalizeUsing CPM -p 8 --bam $sam -o
+${WORKDIR}/mapping/${sam/out.bam/coverage.bw}; done
+
+```
+
+IGV inspection confirmed the genotypes of
+samples.
+Also, it confirmed splice-aware mapping.
+It appears that the library is reverse-stranded.
+
+## Count table preparation
+
+```{bash,eval=FALSE}
+# since featureCounts requires gtf:
+
+gffread ${WORKDIR}/Schizosaccharomyces_pombe.ASM294v2.56.chr.gff3 -T
+-o ${WORKDIR}/Schizosaccharomyces_pombe.ASM294v2.56.chr.gtf
+```
+
+```{bash,eval=FALSE}
+featureCounts -s 2 -p -B -C -T 8 -a \
+${WORKDIR}/Schizosaccharomyces_pombe.ASM294v2.56.chr.gtf \
+-o dbl2_wt_featureCounts_output.txt ${WORKDIR}/mapping/*Aligned.sorted.out.bam
+```
+
+# Analysis of DEG
+
+## Counts table and coldata preparation
+
+```{r counts table preparation}
+Counts <- read.delim("/home/kate/Bioinf/migexam/counts_and_analysis/dbl2_wt_featureCounts_output.txt" , 
+                     header = TRUE, row.names = 1, sep = "\t", skip=1)
+Counts <- Counts %>%
+  subset(select=-c(Chr,Start,End,Strand,Length)) %>%
+  filter(rowSums(.) > 0)
+ 
+colnames(Counts) <- c("dbl2-A-CPT","dbl2-A-NOR", "dbl2-B-CPT","dbl2-B-NOR",
+                      "dbl2-C-CPT", "dbl2-C-NOR", "dbl2-D-CPT", "dbl2-D-NOR", 
+                      "wt-A-CPT", "wt-A-NOR", "wt-B-CPT", "wt-B-NOR", 
+                      "wt-C-CPT", "wt-C-NOR", "wt-D-CPT", "wt-D-NOR")
+
+Counts <- Counts %>%  as.data.frame()%>%
+  tibble::rownames_to_column("pb_gene_id") %>% 
+  mutate(pb_gene_id = substring(pb_gene_id, 6))
+
+write.csv(Counts, "count_matrix.csv", row.names = FALSE)
+
+datatable(Counts)
+```
+
+
+```{r Meta data table, echo=TRUE,message=FALSE}
+row.names(Counts) <- Counts[,1]
+Counts <- Counts[,-1]
+
+
+
+genotype <- factor(c("mut", "mut", "mut", "mut","mut", "mut", "mut", "mut", 
+                     "wt", "wt", "wt", "wt", "wt", "wt", "wt", "wt"))
+
+medium <- factor(c("CPT", "NOR", "CPT", "NOR", "CPT", "NOR", "CPT", "NOR", 
+                   "CPT", "NOR", "CPT", "NOR", "CPT", "NOR", "CPT", "NOR"))
+
+gen_med <- factor(c("mut-CPT", "mut-NOR", "mut-CPT", "mut-NOR", "mut-CPT", 
+                    "mut-NOR", "mut-CPT", "mut-NOR", "wt-CPT", "wt-NOR", 
+                    "wt-CPT", "wt-NOR", "wt-CPT", "wt-NOR", "wt-CPT", "wt-NOR"))
+
+coldata <-data.frame(row.names = colnames(Counts), gen_med)
+coldata$sample <- colnames(Counts)
+coldata$genotype <- genotype
+coldata$medium <- medium
+
+kable(coldata, format = "html", caption = "Meta data table") %>% 
+  kable_styling(., full_width = F, position = "center") 
+```
+
+
+## dds and PCA plot 
+
+```{r PCA of samples variability, echo=TRUE,message=FALSE}
+dds <-DESeqDataSetFromMatrix(countData = Counts, colData = coldata, design = ~ gen_med)
+
+dds <-DESeq(dds)
+vsdata <- vst(dds, blind = F)
+
+plotPCA(vsdata,intgroup="sample")
+```
+
+The PCA plot and QC of raw data showed a difference between A/B replicate and C/D, 
+so I suppose that the replicates were from different runs, and PCA shows a batch effect.
+Therefore:
+
+```{r PCA showing a batch effect, echo=TRUE, message=FALSE}
+run_ef<- factor(c("ab", "ab", "ab", "ab","cd", "cd", "cd", "cd", "ab", "ab", "ab", "ab", "cd", "cd", "cd",
+"cd"))
+
+coldata$run_ef <- run_ef
+
+dds <-DESeqDataSetFromMatrix(countData = Counts, colData = coldata, design = ~ gen_med)
+dds <-DESeq(dds)
+vsdata <- vst(dds, blind = F)
+plotPCA(vsdata,intgroup="run_ef")
+```
+
+```{r dds, echo=TRUE, message=FALSE}
+
+dds<-DESeqDataSetFromMatrix(countData = Counts, colData = coldata, design = ~ run_ef
++ medium + genotype)
+
+dds$genotype <- relevel(dds$genotype, ref = 'wt')
+
+padj_threshold <- 0.05
+
+dds <- DESeq(dds)
+
+res <- results(dds,lfcThreshold = 0.585, alpha = padj_threshold)
+
+datatable(as.data.frame(res))
+```
+
+# Answers to exam questions:
+
+## How many differentially expressed genes did you find (up and downregulated)?
+
+```{r Anwer1}
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+```
+
+
+## How many of those DEGs were non-coding RNAs? 
+```{bash PomBase Annotation downloading, eval=FALSE}
+cd ${WORKDIR}/annotatoin
+wget https://www.pombase.org/data/names_and_identifiers/gene_IDs_names_products.tsv
+```
+
+```{r Answer2, echo=TRUE, message=FALSE}
+pombase_an <- read_tsv("/home/kate/Bioinf/migexam/gene_IDs_names_products.tsv")
+res <- res %>% as.data.frame() %>%  rownames_to_column("gene") 
+res <-res[res$padj <= padj_threshold & !is.na(res$padj), ]
+
+num_non_c_RNA <- pombase_an %>%
+  filter(gene_systematic_id %in% res$gene, grepl("^non-coding RNA", gene_product)) %>%
+  nrow()
+print(num_non_c_RNA)
+```
+
